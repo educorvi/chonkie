@@ -4,9 +4,11 @@ All endpoints live under the ``/v1/chunk`` prefix and return a list of chunk
 dicts (or a list-of-lists when the caller submits a list of texts).
 """
 
+from threading import Lock
 from typing import Any, Dict, List, Union
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 
 from chonkie import (
     CodeChunker,
@@ -15,6 +17,7 @@ from chonkie import (
     SentenceChunker,
     TokenChunker,
 )
+from chonkie.api.model_cache import get_embedding_model
 from chonkie.api.schemas import (
     ChunkingResponse,
     CodeChunkerRequest,
@@ -296,23 +299,25 @@ async def semantic_chunk(request: SemanticChunkerRequest) -> ChunkingResponse:
     text = fix_escaped_text(request.text)
 
     try:
-        # SemanticChunker is intentionally not cached: the embedding model is
-        # heavyweight and request parameters (model, threshold) vary widely.
         timer.start("init")
-        chunker = SemanticChunker(
-            embedding_model=request.embedding_model,
-            threshold=request.threshold,
-            chunk_size=request.chunk_size,
-            similarity_window=request.similarity_window,
-            min_sentences_per_chunk=request.min_sentences_per_chunk,
-            min_characters_per_sentence=request.min_characters_per_sentence,
-            delim=request.delim,
-            include_delim=request.include_delim,
-            skip_window=request.skip_window,
-            filter_window=request.filter_window,
-            filter_polyorder=request.filter_polyorder,
-            filter_tolerance=request.filter_tolerance,
-        )
+
+        def _build_chunker() -> SemanticChunker:
+            return SemanticChunker(
+                embedding_model=get_embedding_model(request.embedding_model),
+                threshold=request.threshold,
+                chunk_size=request.chunk_size,
+                similarity_window=request.similarity_window,
+                min_sentences_per_chunk=request.min_sentences_per_chunk,
+                min_characters_per_sentence=request.min_characters_per_sentence,
+                delim=request.delim,
+                include_delim=request.include_delim,
+                skip_window=request.skip_window,
+                filter_window=request.filter_window,
+                filter_polyorder=request.filter_polyorder,
+                filter_tolerance=request.filter_tolerance,
+            )
+
+        chunker = await run_in_threadpool(_build_chunker)
         log.info(
             "Chunker ready",
             endpoint="POST /v1/chunk/semantic",
@@ -321,7 +326,7 @@ async def semantic_chunk(request: SemanticChunkerRequest) -> ChunkingResponse:
         )
 
         timer.start("chunk")
-        chunks = chunker(text)
+        chunks = await run_in_threadpool(chunker, text)
         result = _chunks_to_response(chunks)
         chunk_count = _chunk_count(chunks)
         log.info(
@@ -348,11 +353,13 @@ async def semantic_chunk(request: SemanticChunkerRequest) -> ChunkingResponse:
             "Semantic chunking failed",
             error=str(exc),
             error_type=type(exc).__name__,
+            exc_info=True,
         )
         raise HTTPException(status_code=500, detail=f"Semantic chunking failed: {exc}") from exc
 
 
 _code_cache: Dict[str, CodeChunker] = {}
+_code_cache_lock = Lock()
 
 
 def _get_code_chunker(tokenizer: str, language: str) -> CodeChunker:
@@ -367,9 +374,10 @@ def _get_code_chunker(tokenizer: str, language: str) -> CodeChunker:
 
     """
     key = f"{tokenizer}:{language}"
-    if key not in _code_cache:
-        _code_cache[key] = CodeChunker(tokenizer=tokenizer, language=language)
-    return _code_cache[key]
+    with _code_cache_lock:
+        if key not in _code_cache:
+            _code_cache[key] = CodeChunker(tokenizer=tokenizer, language=language)
+        return _code_cache[key]
 
 
 @router.post("/code", response_model=None, summary="Chunk source code using AST-based splitting")
@@ -395,7 +403,8 @@ async def code_chunk(request: CodeChunkerRequest) -> ChunkingResponse:
 
     try:
         timer.start("init")
-        chunker = _get_code_chunker(
+        chunker = await run_in_threadpool(
+            _get_code_chunker,
             tokenizer=request.tokenizer,
             language=request.language,
         )

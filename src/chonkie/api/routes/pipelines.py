@@ -11,6 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from chonkie.api.database import get_db
+from chonkie.api.model_cache import (
+    get_embedding_model,
+    get_neural_chunker,
+    get_sentence_transformer_model,
+)
 from chonkie.api.models import Pipeline
 from chonkie.api.schemas import (
     ChunkingResponse,
@@ -76,6 +81,23 @@ def _run_chunk_step(chunker_name: str, config: dict, text: Any) -> Any:
 
     cfg = dict(config)
 
+    if chunker_cls is SemanticChunker:
+        cfg["embedding_model"] = get_embedding_model(
+            cfg.get("embedding_model", "minishlab/potion-base-32M")
+        )
+    elif chunker_cls is LateChunker:
+        model_options = {
+            key: value
+            for key, value in cfg.items()
+            if key not in {"embedding_model", "chunk_size", "rules", "min_characters_per_chunk"}
+        }
+        cfg["embedding_model"] = get_sentence_transformer_model(
+            cfg.get("embedding_model", "nomic-ai/modernbert-embed-base"),
+            **model_options,
+        )
+    elif chunker_cls is NeuralChunker:
+        return get_neural_chunker(cfg)(text)
+
     # RecursiveChunker supports a named recipe via a class-method constructor.
     if chunker_cls is RecursiveChunker and "recipe" in cfg:
         recipe = cfg.pop("recipe")
@@ -131,7 +153,7 @@ def _run_refine_step(refinery_name: str, config: dict, chunks: list) -> list:
     ref: Union[EmbeddingsRefinery, OverlapRefinery]
     if refinery_cls is EmbeddingsRefinery:
         embedding_model = cfg.pop("embedding_model", "text-embedding-3-small")
-        ref = EmbeddingsRefinery(embedding_model=embedding_model)
+        ref = EmbeddingsRefinery(embedding_model=get_embedding_model(embedding_model))
     elif refinery_cls is OverlapRefinery:
         # Never mutate the chunks that might be reused by later steps
         cfg.setdefault("inplace", False)

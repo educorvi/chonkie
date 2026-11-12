@@ -1,9 +1,10 @@
 name: Lint Code
 
 on:
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
+  # pull_request:
+  #   branches:
+  #     - main
 
 jobs:
   lint:

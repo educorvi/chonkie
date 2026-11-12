@@ -8,8 +8,10 @@ of chunk dicts.
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 
 from chonkie import EmbeddingsRefinery, OverlapRefinery
+from chonkie.api.model_cache import get_embedding_model
 from chonkie.api.schemas import EmbeddingsRefineryRequest, OverlapRefineryRequest
 from chonkie.api.utils import Timer, get_logger
 from chonkie.types import Chunk
@@ -85,7 +87,8 @@ async def embeddings_refine(
         )
 
         timer.start("embedding_init")
-        refinery = EmbeddingsRefinery(embedding_model=request.embedding_model)
+        embedding_model = await run_in_threadpool(get_embedding_model, request.embedding_model)
+        refinery = EmbeddingsRefinery(embedding_model=embedding_model)
         log.info(
             "Embedding model ready",
             endpoint="POST /v1/refine/embeddings",
@@ -94,7 +97,7 @@ async def embeddings_refine(
         )
 
         timer.start("refinery")
-        refined = refinery.refine(chunk_objects)
+        refined = await run_in_threadpool(refinery.refine, chunk_objects)
         log.info(
             "Refinery processing completed",
             endpoint="POST /v1/refine/embeddings",
